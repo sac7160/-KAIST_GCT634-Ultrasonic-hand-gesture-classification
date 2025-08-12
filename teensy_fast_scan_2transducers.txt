@@ -1,0 +1,88 @@
+#include <Arduino.h>
+#include <ADC.h>
+
+#define SAMPLE_US      2                 // 2μs 간격
+#define BUFFER_SIZE    32768             // 원형 버퍼 크기
+#define HEADER_BYTE    0xAA
+
+//ADC 객체 생성
+static ADC *adc = new ADC();
+IntervalTimer samTimer;
+
+// 샘플 버퍼
+volatile uint32_t ts_buf[BUFFER_SIZE];     // 타임스탬프 (us 단위)
+volatile uint16_t val0_buf[BUFFER_SIZE];   // A0 입력값
+volatile uint16_t val1_buf[BUFFER_SIZE];   // A1 입력값
+volatile uint16_t head = 0;
+volatile uint16_t tail = 0;
+
+void sampleISR() {
+  uint16_t next = (head + 1) % BUFFER_SIZE;
+  if (next == tail) tail = (tail + 1) % BUFFER_SIZE; // 버퍼 오버플로우 시 덮어쓰기
+
+  ts_buf[head] = micros();
+  val0_buf[head] = adc->adc0->analogReadContinuous();  // A0 값
+  val1_buf[head] = adc->adc1->analogReadContinuous();  // A1 값
+  head = next;
+}
+
+void setup() {
+  Serial.begin(0); // USB Serial (속도는 무시됨)
+  while (!Serial); // 연결 기다림
+
+  // ADC0 설정 (A0)
+  adc->adc0->setAveraging(0);
+  adc->adc0->setResolution(12);
+  adc->adc0->setConversionSpeed(ADC_CONVERSION_SPEED::VERY_HIGH_SPEED);
+  adc->adc0->setSamplingSpeed(ADC_SAMPLING_SPEED::VERY_HIGH_SPEED);
+
+  // ADC1 설정 (A1)
+  adc->adc1->setAveraging(0);
+  adc->adc1->setResolution(12);
+  adc->adc1->setConversionSpeed(ADC_CONVERSION_SPEED::VERY_HIGH_SPEED);
+  adc->adc1->setSamplingSpeed(ADC_SAMPLING_SPEED::VERY_HIGH_SPEED);
+
+  // 두 채널 동기화 연속 측정 시작
+  adc->startSynchronizedContinuous(A0, A1);
+
+  // 2us 간격으로 sampleISR 호출
+  samTimer.begin(sampleISR, SAMPLE_US);
+}
+
+
+void loop() {
+  while (tail != head) {
+    // 'R' 명령 수신 시 버퍼 초기화
+    // 지금은 initialize 일때만
+    if (Serial.available()) {
+      char cmd = Serial.read();
+      if (cmd == 'R') {
+        noInterrupts();
+        //ail = (head - 1 + BUFFER_SIZE) % BUFFER_SIZE;
+        head = tail = 0; //0522수정해봄...
+        interrupts();
+      }
+    }
+
+    if (Serial.availableForWrite() < 9) return;
+
+    Serial.write(HEADER_BYTE);
+    uint32_t ts = ts_buf[tail];
+    uint16_t val0 = val0_buf[tail];
+    uint16_t val1 = val1_buf[tail];
+
+    // 타임스탬프 전송 (4바이트, little endian)
+    Serial.write((uint8_t *)&ts, 4);
+
+    // A0 값 전송 (2바이트)
+    Serial.write(val0 >> 8);
+    Serial.write(val0 & 0xFF);
+
+    // A1 값 전송 (2바이트)
+    Serial.write(val1 >> 8);
+    Serial.write(val1 & 0xFF);
+
+    tail = (tail + 1) % BUFFER_SIZE;
+  }
+}
+
